@@ -6,9 +6,11 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import android.telephony.CellIdentityNr
 import android.telephony.CellInfo
 import android.telephony.CellInfoLte
 import android.telephony.CellInfoNr
+import android.telephony.CellSignalStrengthLte
 import android.telephony.PhoneStateListener
 import android.telephony.ServiceState
 import android.telephony.SignalStrength
@@ -54,8 +56,7 @@ class ProbeForegroundService : Service() {
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            result.lastLocation ?: return
-            val loc = result.lastLocation
+            val loc = result.lastLocation ?: return
             writeLine(JSONObject().apply {
                 put("t", sdf.format(Date()))
                 put("type", "gps")
@@ -99,10 +100,9 @@ class ProbeForegroundService : Service() {
             override fun onSignalStrengthsChanged(ss: SignalStrength) {
                 lastSignal = JSONObject().apply {
                     put("level", ss.level)
-                    put("dbm", runCatching { ss.dbm }.getOrNull() ?: JSONObject.NULL)
-                    // 各制式原始值（华为/小米 ROM 字段名可能不同，缺失记 -1）
-                    put("rsrp", runCatching { ss.getCellSignalStrengths().firstOrNull() }
-                        .getOrNull()?.dbm ?: -1)
+                    val css = ss.cellSignalStrengths.firstOrNull()
+                    put("dbm", css?.dbm ?: -1)
+                    put("rsrp", (css as? CellSignalStrengthLte)?.rsrp ?: -1)
                 }
             }
             override fun onDataConnectionStateChanged(state: Int, networkType: Int) {
@@ -117,7 +117,8 @@ class ProbeForegroundService : Service() {
                 }
             }
             override fun onDisplayInfoChanged(info: TelephonyDisplayInfo) {
-                lastDisplayInfo = "${info.networkType}/${if (info.isSecondaryCellular) "NSA" else "SA/4G"}"
+                val nrAdvanced = runCatching { info.isNrAdvanced }.getOrDefault(false)
+                lastDisplayInfo = "${info.networkType}/${if (nrAdvanced) "NR_ADV" else "STD"}"
             }
         }
         runCatching {
@@ -139,14 +140,15 @@ class ProbeForegroundService : Service() {
                     put("ci", primary.cellIdentity.ci)
                     put("pci", primary.cellIdentity.pci)
                     put("earfcn", primary.cellIdentity.earfcn)
-                    primary.cellSignalStrength.rsrp.takeIf { it != CellInfo.UNAVAILABLE_RSRP }
-                        ?.let { put("rsrp", it) }
+                    val rsrp = primary.cellSignalStrength.rsrp
+                    if (rsrp != CellInfo.UNAVAILABLE) put("rsrp", rsrp)
                 }
                 is CellInfoNr -> JSONObject().apply {
                     put("rat", "NR")
-                    put("nci", primary.cellIdentity.nci)
-                    put("pci", primary.cellIdentity.pci)
-                    put("nrarfcn", primary.cellIdentity.nrarfcn)
+                    val ci = primary.cellIdentity as? CellIdentityNr
+                    put("nci", ci?.nci ?: -1)
+                    put("pci", ci?.pci ?: -1)
+                    put("nrarfcn", ci?.nrarfcn ?: -1)
                 }
                 else -> primary?.let { JSONObject().apply { put("rat", it.javaClass.simpleName) } }
             }
@@ -205,4 +207,8 @@ class ProbeForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    companion object {
+        private const val TAG = "ProbeSvc"
+    }
 }

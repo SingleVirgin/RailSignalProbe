@@ -5,6 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.IBinder
 import android.telephony.CellIdentityNr
 import android.telephony.CellInfo
@@ -17,11 +20,6 @@ import android.telephony.SignalStrength
 import android.telephony.TelephonyDisplayInfo
 import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.io.File
@@ -54,9 +52,12 @@ class ProbeForegroundService : Service() {
 
     private var phoneListener: PhoneStateListener? = null
 
-    private val locationCallback = object : LocationCallback() {
-        override fun onLocationResult(result: LocationResult) {
-            val loc = result.lastLocation ?: return
+    // 系统原生定位（不依赖 GMS，兼容鸿蒙卓易通等无 Google 服务环境）
+    private lateinit var locationManager: LocationManager
+    private val registeredListeners = mutableListOf<Pair<String, LocationListener>>()
+
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(loc: Location) {
             writeLine(JSONObject().apply {
                 put("t", sdf.format(Date()))
                 put("type", "gps")
@@ -78,21 +79,27 @@ class ProbeForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        telephony = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        outFile = File(getExternalFilesDir(null), "probe_$stamp.jsonl")
+        runCatching {
+            telephony = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            outFile = File(getExternalFilesDir(null), "probe_$stamp.jsonl")
 
-        registerPhoneListener()
-        startForegroundServiceInternal()
-        requestLocation()
+            registerPhoneListener()
+            startForegroundServiceInternal()
+            requestLocation()
 
-        scope.launch {
-            while (isActive) {
-                pollCellInfo()
-                delay(1000)
+            scope.launch {
+                while (isActive) {
+                    pollCellInfo()
+                    delay(1000)
+                }
             }
+            android.util.Log.i(TAG, "采集写入 ${outFile.absolutePath}")
+        }.onFailure {
+            android.util.Log.e(TAG, "onCreate 失败", it)
+            CrashLogger.write(this, it)
+            stopSelf()
         }
-        android.util.Log.i(TAG, "采集写入 ${outFile.absolutePath}")
     }
 
     private fun registerPhoneListener() {
@@ -155,12 +162,26 @@ class ProbeForegroundService : Service() {
     }
 
     private fun requestLocation() {
-        val client = LocationServices.getFusedLocationProviderClient(this)
-        val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
-            .setMinUpdateIntervalMillis(500L)
-            .setMaxUpdateDelayMillis(2000L)
-            .build()
-        runCatching { client.requestLocationUpdates(req, locationCallback, mainLooper) }
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val candidates = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.FUSED_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        ).filter { locationManager.allProviders.contains(it) }
+        if (candidates.isEmpty()) {
+            android.util.Log.w(TAG, "无可用定位 Provider")
+            return
+        }
+        for (p in candidates) {
+            runCatching {
+                locationManager.requestLocationUpdates(p, 1000L, 0f, locationListener, mainLooper)
+                registeredListeners.add(p to locationListener)
+                android.util.Log.i(TAG, "定位已注册 provider=$p")
+            }.onFailure {
+                android.util.Log.w(TAG, "provider=$p 注册失败: ${it.message}")
+            }
+        }
     }
 
     private fun writeLine(json: JSONObject) {
@@ -199,8 +220,12 @@ class ProbeForegroundService : Service() {
 
     override fun onDestroy() {
         runCatching { telephony.listen(phoneListener, PhoneStateListener.LISTEN_NONE) }
-        LocationServices.getFusedLocationProviderClient(this)
-            .removeLocationUpdates(locationCallback)
+        runCatching {
+            registeredListeners.forEach { (p, l) ->
+                locationManager.removeUpdates(l)
+            }
+            registeredListeners.clear()
+        }
         scope.cancel()
         super.onDestroy()
     }

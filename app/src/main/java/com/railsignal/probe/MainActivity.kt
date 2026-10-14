@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLogger.install(applicationContext)
         buildUi()
         appendLog("RailSignalProbe v0.1 — 高铁信号采集工具")
         appendLog("输出目录: ${getExternalFilesDir(null)}")

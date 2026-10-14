@@ -117,8 +117,7 @@ class ProbeForegroundService : Service() {
                 }
             }
             override fun onDisplayInfoChanged(info: TelephonyDisplayInfo) {
-                val nrAdvanced = runCatching { info.isNrAdvanced }.getOrDefault(false)
-                lastDisplayInfo = "${info.networkType}/${if (nrAdvanced) "NR_ADV" else "STD"}"
+                lastDisplayInfo = networkTypeName(info.networkType)
             }
         }
         runCatching {
